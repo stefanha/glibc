@@ -72,6 +72,13 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <libc-lock.h>
 #include <scratch_buffer.h>
 
+/* TODO This uapi kernel header is needed for struct sockaddr_vm.  Do I need to
+ * import/reimplement the header for glibc?
+ */
+#ifdef AF_VSOCK
+#include <linux/vm_sockets.h>
+#endif /* AF_VSOCK */
+
 #ifdef HAVE_LIBIDN
 # include <libidn/idna.h>
 extern int __idna_to_unicode_lzlz (const char *input, char **output,
@@ -412,6 +419,22 @@ gni_host_local (struct scratch_buffer *tmpbuf,
   return checked_copy (host, hostlen, "localhost");
 }
 
+#ifdef AF_VSOCK
+/* Convert AF_VSOCK socket address, host part.   */
+static int
+gni_host_vsock (struct scratch_buffer *tmpbuf,
+		const struct sockaddr *sa, socklen_t addrlen,
+		char *host, socklen_t hostlen, int flags)
+{
+  const struct sockaddr_vm *svm = (const struct sockaddr_vm *) sa;
+
+  if ((flags & NI_NAMEREQD) && !(flags & NI_NUMERICHOST))
+    return EAI_NONAME;
+
+  return CHECKED_SNPRINTF (host, hostlen, "%u", svm->svm_cid);
+}
+#endif /* AF_VSOCK */
+
 /* Convert the host part of an AF_LOCAK socket address.   */
 static int
 gni_host (struct scratch_buffer *tmpbuf,
@@ -426,6 +449,11 @@ gni_host (struct scratch_buffer *tmpbuf,
 
     case AF_LOCAL:
       return gni_host_local (tmpbuf, sa, addrlen, host, hostlen, flags);
+
+#ifdef AF_VSOCK
+    case AF_VSOCK:
+      return gni_host_vsock (tmpbuf, sa, addrlen, host, hostlen, flags);
+#endif /* AF_VSOCK */
 
     default:
       return EAI_FAMILY;
@@ -479,6 +507,20 @@ gni_serv_local (struct scratch_buffer *tmpbuf,
     (serv, servlen, ((const struct sockaddr_un *) sa)->sun_path);
 }
 
+#ifdef AF_VSOCK
+/* Convert service to string, AF_VSOCK variant.  */
+static int
+gni_serv_vsock (struct scratch_buffer *tmpbuf,
+	       const struct sockaddr *sa, socklen_t addrlen,
+	       char *serv, socklen_t servlen, int flags)
+{
+  const struct sockaddr_vm *svm = (const struct sockaddr_vm *) sa;
+
+  return CHECKED_SNPRINTF (serv, servlen, "%u", svm->svm_port);
+}
+#endif /* AF_VSOCK */
+
+
 /* Convert service to string, dispatching to the implementations
    above.  */
 static int
@@ -493,6 +535,10 @@ gni_serv (struct scratch_buffer *tmpbuf,
       return gni_serv_inet (tmpbuf, sa, addrlen, serv, servlen, flags);
     case AF_LOCAL:
       return gni_serv_local (tmpbuf, sa, addrlen, serv, servlen, flags);
+#ifdef AF_VSOCK
+    case AF_VSOCK:
+      return gni_serv_vsock (tmpbuf, sa, addrlen, serv, servlen, flags);
+#endif /* AF_VSOCK */
     default:
       return EAI_FAMILY;
     }
@@ -530,6 +576,12 @@ getnameinfo (const struct sockaddr *sa, socklen_t addrlen, char *host,
       if (addrlen < sizeof (struct sockaddr_in6))
 	return EAI_FAMILY;
       break;
+#ifdef AF_VSOCK
+    case AF_VSOCK:
+      if (addrlen < sizeof (struct sockaddr_vm))
+	return EAI_FAMILY;
+      break;
+#endif /* AF_VSOCK */
     default:
       return EAI_FAMILY;
     }
