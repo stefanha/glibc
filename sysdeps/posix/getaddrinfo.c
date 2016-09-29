@@ -83,6 +83,9 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <resolv/res_hconf.h>
 #include <scratch_buffer.h>
 #include <inet/net-internal.h>
+#ifdef AF_VSOCK
+#include <linux/vm_sockets.h>
+#endif /* AF_VSOCK */
 
 #ifdef HAVE_LIBIDN
 extern int __idna_to_ascii_lz (const char *input, char **output, int flags);
@@ -1238,6 +1241,75 @@ gaih_inet (const char *name, const struct gaih_service *service,
   return result;
 }
 
+#ifdef AF_VSOCK
+static int
+gaih_vsock (const char *name, const struct gaih_service *service,
+	    const struct addrinfo *req, struct addrinfo **pai,
+	    unsigned int *naddrs)
+{
+  struct addrinfo *ai;
+  struct sockaddr_vm *svm;
+  unsigned int svm_port = 0;
+  unsigned int svm_cid = 0;
+  char *canon = NULL;
+
+  if (req->ai_protocol != 0)
+    return -EAI_SOCKTYPE;
+
+  if (service != NULL)
+    {
+      if (service->num < 0)
+	  return -EAI_SERVICE;
+
+      svm_port = service->num;
+    }
+
+  if (name != NULL)
+    {
+      char *c;
+      svm_cid = strtoul (name, &c, 10);
+      if (c == name || *c != '\0')
+	  return EAI_NONAME;
+
+      if (req->ai_flags & AI_CANONNAME)
+	{
+	  canon = strdup (name);
+	  if (canon == NULL)
+	    return -EAI_MEMORY;
+	}
+    }
+
+  ai = *pai = malloc (sizeof (struct addrinfo) + sizeof (struct sockaddr_vm));
+  if (ai == NULL)
+    {
+      free (canon);
+      return -EAI_MEMORY;
+    }
+
+  ai->ai_flags = req->ai_flags;
+  ai->ai_family = req->ai_family;
+  ai->ai_socktype = req->ai_socktype;
+  ai->ai_protocol = req->ai_protocol;
+  ai->ai_addrlen = sizeof (*svm);
+  ai->ai_addr = (void *) (ai + 1);
+  ai->ai_canonname = canon;
+  ai->ai_next = NULL;
+
+#ifdef _HAVE_SA_LEN
+  ai->ai_addr->sa_len = sizeof (*svm);
+#endif /* _HAVE_SA_LEN */
+  ai->ai_addr->sa_family = req->ai_family;
+
+  svm = (struct sockaddr_vm *) ai->ai_addr;
+  svm->svm_port = svm_port;
+  svm->svm_cid = svm_cid;
+  memset(svm->svm_zero, '\0', sizeof (svm->svm_zero));
+
+  *naddrs = 1;
+  return 0;
+}
+#endif /* AF_VSOCK */
+
 
 struct sort_result
 {
@@ -2372,24 +2444,30 @@ getaddrinfo (const char *name, const char *service,
       scratch_buffer_init (&tmpbuf);
       last_i = gaih_inet (name, pservice, hints, end, &naddrs, &tmpbuf);
       scratch_buffer_free (&tmpbuf);
-
-      if (last_i != 0)
-	{
-	  freeaddrinfo (p);
-	  __free_in6ai (in6ai);
-
-	  return -last_i;
-	}
-      while (*end)
-	{
-	  end = &((*end)->ai_next);
-	  ++nresults;
-	}
     }
+#ifdef AF_VSOCK
+  else if (hints->ai_family == AF_VSOCK)
+    {
+      last_i = gaih_vsock (name, pservice, hints, end, &naddrs);
+    }
+#endif /* AF_VSOCK */
   else
     {
       __free_in6ai (in6ai);
       return EAI_FAMILY;
+    }
+
+  if (last_i != 0)
+    {
+      freeaddrinfo (p);
+      __free_in6ai (in6ai);
+
+      return -last_i;
+    }
+  while (*end)
+    {
+      end = &((*end)->ai_next);
+      ++nresults;
     }
 
   if (naddrs > 1)
